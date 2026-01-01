@@ -369,6 +369,15 @@ class CalibratorTab(ttk.Frame):
         self.after(200, self._auto_connect)
 
     def _load_latest_version(self):
+        # Prefer fetching the latest version from the repository's raw version.txt on GitHub.
+        # Fall back to a local version.txt if network fails.
+        github_raw = 'https://raw.githubusercontent.com/Archer2121/ESP32-Joystick/main/version.txt'
+        try:
+            r = requests.get(github_raw, timeout=5)
+            if r.status_code == 200:
+                return r.text.strip()
+        except Exception:
+            pass
         try:
             with open(os.path.join(BASE, 'version.txt'), 'r', encoding='utf-8') as f:
                 return f.read().strip()
