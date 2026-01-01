@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include "USB.h"
 #include "USBHIDKeyboard.h"
+#define FW_VERSION "1.0.0"
 
 // ==========================================
 //               CONFIGURATION
