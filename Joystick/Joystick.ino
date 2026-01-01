@@ -18,7 +18,7 @@
 #define OLED_RST 21
 
 // Default Values
-#define DEFAULT_DEADZONE 0.15f // 15% Radial Deadzone
+#define DEFAULT_DEADZONE 0.15f  // 15% Radial Deadzone
 
 // ==========================================
 //               OBJECTS & GLOBALS
@@ -64,7 +64,7 @@ String currentDirLabel = "NEUTRAL";
 //               SETUP
 // ==========================================
 void loadCalibration() {
-  prefs.begin("joystick", true); // Read-only mode first
+  prefs.begin("joystick", true);  // Read-only mode first
   joyConfig.minX = prefs.getInt("minX", 0);
   joyConfig.maxX = prefs.getInt("maxX", 4095);
   joyConfig.centerX = prefs.getInt("centerX", 2048);
@@ -76,7 +76,7 @@ void loadCalibration() {
 }
 
 void saveCalibration() {
-  prefs.begin("joystick", false); // Read-write mode
+  prefs.begin("joystick", false);  // Read-write mode
   prefs.putInt("minX", joyConfig.minX);
   prefs.putInt("maxX", joyConfig.maxX);
   prefs.putInt("centerX", joyConfig.centerX);
@@ -90,10 +90,10 @@ void saveCalibration() {
 
 void setup() {
   Serial.begin(115200);
-  
+
   // Initialize I2C for Heltec V3
   Wire.begin(OLED_SDA, OLED_SCL);
-  
+
   u8g2.begin();
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x10_tf);
@@ -107,7 +107,7 @@ void setup() {
   // Pin Setup
   pinMode(PIN_JOY_X, INPUT);
   pinMode(PIN_JOY_Y, INPUT);
-  analogReadResolution(12); // 0-4095
+  analogReadResolution(12);  // 0-4095
 
   loadCalibration();
   delay(1000);
@@ -123,15 +123,15 @@ void readJoystick() {
 
   // 1. Normalize to -1.0 to 1.0 based on calibration
   float nX, nY;
-  
-  if (rawX >= joyConfig.centerX) 
+
+  if (rawX >= joyConfig.centerX)
     nX = (float)(rawX - joyConfig.centerX) / (joyConfig.maxX - joyConfig.centerX);
-  else 
+  else
     nX = -(float)(joyConfig.centerX - rawX) / (joyConfig.centerX - joyConfig.minX);
 
-  if (rawY >= joyConfig.centerY) 
+  if (rawY >= joyConfig.centerY)
     nY = (float)(rawY - joyConfig.centerY) / (joyConfig.maxY - joyConfig.centerY);
-  else 
+  else
     nY = -(float)(joyConfig.centerY - rawY) / (joyConfig.centerY - joyConfig.minY);
 
   // Clamp
@@ -140,7 +140,7 @@ void readJoystick() {
 
   // 2. Radial Deadzone Calculation
   // Calculate magnitude (distance from center)
-  float rad = sqrt(nX*nX + nY*nY);
+  float rad = sqrt(nX * nX + nY * nY);
 
   // Apply Deadzone
   if (rad < joyConfig.deadzone) {
@@ -151,7 +151,7 @@ void readJoystick() {
     // Rescale the remaining range to 0.0 - 1.0 for smooth control
     float scaledRad = (rad - joyConfig.deadzone) / (1.0f - joyConfig.deadzone);
     scaledRad = constrain(scaledRad, 0.0f, 1.0f);
-    
+
     // Preserve angle
     normX = (nX / rad) * scaledRad;
     normY = (nY / rad) * scaledRad;
@@ -167,7 +167,7 @@ void handleWASD() {
   // Logic for 8-way directional pad
   // Sectors are 45 degrees each. 360 / 8 = 45.
   // Offset by 22.5 to center the cardinal directions.
-  
+
   bool w = false, a = false, s = false, d = false;
   currentDirLabel = "NEUTRAL";
 
@@ -175,23 +175,48 @@ void handleWASD() {
     // Angle 0 is usually Right (East) on Cartesian plane
     // Adjust based on joystick orientation. Assuming standard: Y+ is Down/Up?, X+ is Right.
     // Usually: X0=Left, X4095=Right. Y0=Up, Y4095=Down.
-    
+
     // Determine sector
-    if (angle >= 337.5 || angle < 22.5)       { d = true; currentDirLabel = "RIGHT"; }
-    else if (angle >= 22.5 && angle < 67.5)   { d = true; s = true; currentDirLabel = "DOWN-RIGHT"; }
-    else if (angle >= 67.5 && angle < 112.5)  { s = true; currentDirLabel = "DOWN"; }
-    else if (angle >= 112.5 && angle < 157.5) { s = true; a = true; currentDirLabel = "DOWN-LEFT"; }
-    else if (angle >= 157.5 && angle < 202.5) { a = true; currentDirLabel = "LEFT"; }
-    else if (angle >= 202.5 && angle < 247.5) { a = true; w = true; currentDirLabel = "UP-LEFT"; }
-    else if (angle >= 247.5 && angle < 292.5) { w = true; currentDirLabel = "UP"; }
-    else if (angle >= 292.5 && angle < 337.5) { w = true; d = true; currentDirLabel = "UP-RIGHT"; }
+    if (angle >= 337.5 || angle < 22.5) {
+      d = true;
+      currentDirLabel = "RIGHT";
+    } else if (angle >= 22.5 && angle < 67.5) {
+      d = true;
+      s = true;
+      currentDirLabel = "DOWN-RIGHT";
+    } else if (angle >= 67.5 && angle < 112.5) {
+      s = true;
+      currentDirLabel = "DOWN";
+    } else if (angle >= 112.5 && angle < 157.5) {
+      s = true;
+      a = true;
+      currentDirLabel = "DOWN-LEFT";
+    } else if (angle >= 157.5 && angle < 202.5) {
+      a = true;
+      currentDirLabel = "LEFT";
+    } else if (angle >= 202.5 && angle < 247.5) {
+      a = true;
+      w = true;
+      currentDirLabel = "UP-LEFT";
+    } else if (angle >= 247.5 && angle < 292.5) {
+      w = true;
+      currentDirLabel = "UP";
+    } else if (angle >= 292.5 && angle < 337.5) {
+      w = true;
+      d = true;
+      currentDirLabel = "UP-RIGHT";
+    }
   }
 
   // Send Key States
-  if(w) Keyboard.press('w'); else Keyboard.release('w');
-  if(a) Keyboard.press('a'); else Keyboard.release('a');
-  if(s) Keyboard.press('s'); else Keyboard.release('s');
-  if(d) Keyboard.press('d'); else Keyboard.release('d');
+  if (w) Keyboard.press('w');
+  else Keyboard.release('w');
+  if (a) Keyboard.press('a');
+  else Keyboard.release('a');
+  if (s) Keyboard.press('s');
+  else Keyboard.release('s');
+  if (d) Keyboard.press('d');
+  else Keyboard.release('d');
 }
 
 // ==========================================
@@ -201,7 +226,7 @@ void drawRunning() {
   u8g2.setFont(u8g2_font_profont12_tf);
   u8g2.setCursor(0, 10);
   u8g2.print("Mode: RUN");
-  
+
   u8g2.setFont(u8g2_font_profont17_tf);
   int strWidth = u8g2.getStrWidth(currentDirLabel.c_str());
   u8g2.setCursor((128 - strWidth) / 2, 40);
@@ -210,8 +235,10 @@ void drawRunning() {
   // Small debug info at bottom
   u8g2.setFont(u8g2_font_micro_tr);
   u8g2.setCursor(0, 60);
-  u8g2.print("X:"); u8g2.print(normX); 
-  u8g2.print(" Y:"); u8g2.print(normY);
+  u8g2.print("X:");
+  u8g2.print(normX);
+  u8g2.print(" Y:");
+  u8g2.print(normY);
 }
 
 void drawVisualizer() {
@@ -222,17 +249,17 @@ void drawVisualizer() {
 
   // Draw Outer Ring
   u8g2.drawCircle(cx, cy, r, U8G2_DRAW_ALL);
-  
+
   // Draw Deadzone Ring (Visual representation)
   int dr = r * joyConfig.deadzone;
-  if(dr < 2) dr = 2;
+  if (dr < 2) dr = 2;
   u8g2.drawCircle(cx, cy, dr, U8G2_DRAW_ALL);
 
   // Draw Stick Position
   // Map -1.0/1.0 to -r/r
   int px = cx + (normX * r);
   int py = cy + (normY * r);
-  
+
   u8g2.drawDisc(px, py, 2, U8G2_DRAW_ALL);
   u8g2.drawLine(cx, cy, px, py);
 
@@ -251,8 +278,10 @@ void drawCalibration() {
     u8g2.drawStr(5, 20, "Rotate Stick to");
     u8g2.drawStr(5, 35, "ALL Edges (Min/Max)");
     u8g2.setCursor(5, 55);
-    u8g2.print("X:"); u8g2.print(analogRead(PIN_JOY_X));
-    u8g2.print(" Y:"); u8g2.print(analogRead(PIN_JOY_Y));
+    u8g2.print("X:");
+    u8g2.print(analogRead(PIN_JOY_X));
+    u8g2.print(" Y:");
+    u8g2.print(analogRead(PIN_JOY_Y));
   }
 }
 
@@ -263,7 +292,7 @@ void handleSerial() {
   if (Serial.available() > 0) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
-    
+
     if (cmd == "help") {
       Serial.println("\n--- HELP ---");
       Serial.println("cal           : Start Calibration Wizard");
@@ -272,32 +301,28 @@ void handleSerial() {
       Serial.println("debug         : Toggle Serial Output");
       Serial.println("next          : Advance Calibration Step");
       Serial.println("set_deadzone X: Set deadzone (e.g. 0.2 for 20%)");
-    } 
-    else if (cmd == "cal") {
+    } else if (cmd == "cal") {
       Serial.println("Starting Calibration. Center stick and type 'next'");
       currentState = STATE_CALIBRATING_CENTER;
-    }
-    else if (cmd == "viz") {
+    } else if (cmd == "viz") {
       Serial.println("Visualizer Mode.");
       currentState = STATE_VISUALIZE;
-    }
-    else if (cmd == "run") {
+    } else if (cmd == "run") {
       Serial.println("Running Mode.");
       currentState = STATE_RUNNING;
-    }
-    else if (cmd == "debug") {
+    } else if (cmd == "debug") {
       debugMode = !debugMode;
-      Serial.print("Debug Mode: "); Serial.println(debugMode ? "ON" : "OFF");
-    }
-    else if (cmd.startsWith("set_deadzone ")) {
+      Serial.print("Debug Mode: ");
+      Serial.println(debugMode ? "ON" : "OFF");
+    } else if (cmd.startsWith("set_deadzone ")) {
       float newDz = cmd.substring(13).toFloat();
-      if(newDz >= 0 && newDz < 0.9) {
+      if (newDz >= 0 && newDz < 0.9) {
         joyConfig.deadzone = newDz;
         saveCalibration();
-        Serial.print("Deadzone set to: "); Serial.println(newDz);
+        Serial.print("Deadzone set to: ");
+        Serial.println(newDz);
       }
-    }
-    else if (cmd == "next") {
+    } else if (cmd == "next") {
       if (currentState == STATE_CALIBRATING_CENTER) {
         joyConfig.centerX = analogRead(PIN_JOY_X);
         joyConfig.centerY = analogRead(PIN_JOY_Y);
@@ -312,8 +337,7 @@ void handleSerial() {
         saveCalibration();
         currentState = STATE_RUNNING;
         Serial.println("Calibration Complete.");
-      }
-      else if (cmd == "version") {
+      } else if (cmd == "version") {
         Serial.print("FW_VERSION:");
         Serial.println(FW_VERSION);
       }
@@ -326,7 +350,7 @@ void handleSerial() {
 // ==========================================
 void loop() {
   handleSerial();
-  
+
   u8g2.clearBuffer();
 
   switch (currentState) {
@@ -334,11 +358,11 @@ void loop() {
       readJoystick();
       handleWASD();
       drawRunning();
-      
+
       if (debugMode) {
-        Serial.printf("Raw: %d,%d | Norm: %.2f,%.2f | Dir: %s\n", 
-          analogRead(PIN_JOY_X), analogRead(PIN_JOY_Y), 
-          normX, normY, currentDirLabel.c_str());
+        Serial.printf("Raw: %d,%d | Norm: %.2f,%.2f | Dir: %s\n",
+                      analogRead(PIN_JOY_X), analogRead(PIN_JOY_Y),
+                      normX, normY, currentDirLabel.c_str());
       }
       break;
 
@@ -356,14 +380,14 @@ void loop() {
       // Continually update min/max while user rotates
       int rx = analogRead(PIN_JOY_X);
       int ry = analogRead(PIN_JOY_Y);
-      if(rx < joyConfig.minX) joyConfig.minX = rx;
-      if(rx > joyConfig.maxX) joyConfig.maxX = rx;
-      if(ry < joyConfig.minY) joyConfig.minY = ry;
-      if(ry > joyConfig.maxY) joyConfig.maxY = ry;
+      if (rx < joyConfig.minX) joyConfig.minX = rx;
+      if (rx > joyConfig.maxX) joyConfig.maxX = rx;
+      if (ry < joyConfig.minY) joyConfig.minY = ry;
+      if (ry > joyConfig.maxY) joyConfig.maxY = ry;
       drawCalibration();
       break;
   }
 
   u8g2.sendBuffer();
-  delay(20); // ~50Hz refresh
+  delay(20);  // ~50Hz refresh
 }

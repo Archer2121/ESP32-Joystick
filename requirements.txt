@@ -1,0 +1,2 @@
+pyserial
+# tkinter is included with standard Python installs on Windows; no pip package required.

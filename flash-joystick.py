@@ -1,21 +1,20 @@
+# ...existing code...
 import os, threading, subprocess, requests, serial, time
 import serial.tools.list_ports
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, filedialog
 
-CHIP = "esp32s3"
-BAUD_FLASH = "460800"
+CHIP = "auto"
+BAUD_FLASH = "921600"
 BAUD_SERIAL = 115200
 
-VERSION_URL = "https://raw.githubusercontent.com/Archer2121/Macropad/main/version.txt"
-FW_BASE = "https://raw.githubusercontent.com/Archer2121/Macropad/main/main/build/esp32.esp32.lolin_s3"
+# Use the merged Arduino output (single app binary)
+MERGED_FILENAME = "Joystick.ino.merged.bin"
+APP_ADDR = "0x10000"
+FW_MERGED_URL = f"https://github.com/Archer2121/ESP32-Joystick/raw/597c542eba42b7a166a790ff989ffe8bf63c3959/Joystick/build/Heltec-esp32.esp32.heltec_wifi_lora_32_V3/Joystick.ino.merged.bin"
 
-FILES = {
-    "bootloader": ("main.ino.bootloader.bin", "0x0000"),
-    "partitions": ("main.ino.partitions.bin", "0x8000"),
-    "boot_app0": ("boot_app0.bin", "0xE000"),
-    "app": ("main.ino.bin", "0x10000"),
-}
+# adjust if your module has different flash size
+FLASH_SIZE_BYTES = 8 * 1024 * 1024
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 FW_DIR = os.path.join(BASE, "firmware")
@@ -24,7 +23,7 @@ os.makedirs(FW_DIR, exist_ok=True)
 class FirmwareUpdater(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Macropad Firmware Updater")
+        self.title("Joystick Firmware Updater (merged)")
         self.geometry("720x460")
 
         self.port = tk.StringVar()
@@ -36,7 +35,7 @@ class FirmwareUpdater(tk.Tk):
         self.ports.pack()
 
         ttk.Button(self, text="Refresh Ports", command=self.refresh_ports).pack(pady=3)
-        ttk.Button(self, text="Update Firmware (GitHub)", command=self.start_update).pack(pady=5)
+        ttk.Button(self, text="Update Firmware (merged)", command=self.start_update).pack(pady=5)
 
         ttk.Progressbar(self, maximum=100, variable=self.progress).pack(fill="x", padx=10)
         ttk.Label(self, textvariable=self.status).pack(pady=4)
@@ -77,20 +76,67 @@ class FirmwareUpdater(tk.Tk):
                 break
 
     def start_update(self):
-        threading.Thread(target=self.update, daemon=True).start()
+        resp = messagebox.askquestion("Update Source", "Update from a local merged .bin file?\nYes = local file, No = GitHub merged binary")
+        if resp == "yes":
+            path = filedialog.askopenfilename(title="Select merged .bin file", filetypes=[("Binary files","*.bin"),("All files","*.*")])
+            if not path:
+                return
+            threading.Thread(target=self.update, args=(path,), daemon=True).start()
+        else:
+            threading.Thread(target=self.update, daemon=True).start()
 
-    def update(self):
+    def enter_flash_mode(self):
+        try:
+            if self.ser:
+                try:
+                    self.ser.close()
+                except:
+                    pass
+                self.ser = None
+
+            s = serial.Serial(self.port.get(), BAUD_SERIAL, timeout=0.1)
+            # Toggle DTR/RTS sequence to try to force ESP32 into bootloader
+            s.setDTR(False)
+            s.setRTS(True)
+            time.sleep(0.05)
+            s.setDTR(True)
+            s.setRTS(False)
+            time.sleep(0.05)
+            s.close()
+            self.log("[INFO] Flash-mode sequence toggled.\n")
+        except Exception as e:
+            self.log(f"[BOOT MODE ERROR] {e}\n")
+
+    def update(self, local_bin=None):
         try:
             self.progress.set(0)
-            self.status.set("Downloading firmware...")
+            if local_bin:
+                self.status.set("Preparing local merged update...")
+            else:
+                self.status.set("Downloading merged binary...")
 
-            for i, (_, (f, _)) in enumerate(FILES.items()):
-                r = requests.get(f"{FW_BASE}/{f}", timeout=20)
+            merged_path = None
+            if not local_bin:
+                r = requests.get(FW_MERGED_URL, timeout=30)
                 if r.status_code != 200:
-                    raise RuntimeError(f"Failed to download {f}")
-                with open(os.path.join(FW_DIR, f), "wb") as w:
+                    raise RuntimeError(f"Failed to download {MERGED_FILENAME}")
+                merged_path = os.path.join(FW_DIR, MERGED_FILENAME)
+                with open(merged_path, "wb") as w:
                     w.write(r.content)
-                self.progress.set(10 + i * 8)
+                self.progress.set(50)
+            else:
+                merged_path = local_bin
+                self.progress.set(50)
+
+            file_size = os.path.getsize(merged_path)
+            default_offset = int(APP_ADDR, 16)
+            if file_size > FLASH_SIZE_BYTES - default_offset:
+                flash_addr = "0x0"
+            else:
+                flash_addr = APP_ADDR
+
+            self.status.set("Entering flash mode...")
+            self.enter_flash_mode()
 
             self.status.set("Erasing flash...")
             subprocess.run(
@@ -98,16 +144,13 @@ class FirmwareUpdater(tk.Tk):
                 check=True
             )
 
-            self.status.set("Flashing firmware...")
+            self.status.set(f"Flashing merged binary at {flash_addr}...")
             cmd = ["esptool", "--chip", CHIP, "--port", self.port.get(),
-                   "--baud", BAUD_FLASH, "write_flash"]
-            for _, (f, addr) in FILES.items():
-                cmd += [addr, os.path.join(FW_DIR, f)]
+                   "--baud", BAUD_FLASH, "write-flash", flash_addr, merged_path]
             subprocess.run(cmd, check=True)
 
             self.progress.set(100)
             self.status.set("Update complete ✔")
-
             time.sleep(2)
             self.start_serial()
 
@@ -116,4 +159,6 @@ class FirmwareUpdater(tk.Tk):
             self.status.set("Error")
             messagebox.showerror("Error", str(e))
 
-FirmwareUpdater().mainloop()
+if __name__ == "__main__":
+    FirmwareUpdater().mainloop()
+# ...existing code...
