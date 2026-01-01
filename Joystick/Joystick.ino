@@ -337,10 +337,10 @@ void handleSerial() {
         saveCalibration();
         currentState = STATE_RUNNING;
         Serial.println("Calibration Complete.");
-      } else if (cmd == "version") {
-        Serial.print("FW_VERSION:");
-        Serial.println(FW_VERSION);
       }
+    } else if (cmd == "version") {
+      Serial.print("FW_VERSION:");
+      Serial.println(FW_VERSION);
     }
   }
 }
