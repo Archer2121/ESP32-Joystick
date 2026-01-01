@@ -290,10 +290,24 @@ void drawCalibration() {
 // ==========================================
 void handleSerial() {
   if (Serial.available() > 0) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
+    String line = Serial.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) return;
+    Serial.print("Received cmd: ");
+    Serial.println(line);
 
-    if (cmd == "help") {
+    // Prepare case-insensitive command token and a preserved-arg string
+    String lc = line;
+    lc.toLowerCase();
+    int sp = lc.indexOf(' ');
+    String verb = (sp == -1) ? lc : lc.substring(0, sp);
+    String arg = "";
+    if (sp != -1) {
+      arg = line.substring(sp + 1);
+      arg.trim();
+    }
+
+    if (verb == "help") {
       Serial.println("\n--- HELP ---");
       Serial.println("cal           : Start Calibration Wizard");
       Serial.println("viz           : Visualize Deadzone on OLED");
@@ -301,28 +315,41 @@ void handleSerial() {
       Serial.println("debug         : Toggle Serial Output");
       Serial.println("next          : Advance Calibration Step");
       Serial.println("set_deadzone X: Set deadzone (e.g. 0.2 for 20%)");
-    } else if (cmd == "cal") {
+      Serial.println("version       : Print firmware version");
+
+    } else if (verb == "cal") {
       Serial.println("Starting Calibration. Center stick and type 'next'");
       currentState = STATE_CALIBRATING_CENTER;
-    } else if (cmd == "viz") {
+
+    } else if (verb == "viz") {
       Serial.println("Visualizer Mode.");
       currentState = STATE_VISUALIZE;
-    } else if (cmd == "run") {
+
+    } else if (verb == "run") {
       Serial.println("Running Mode.");
       currentState = STATE_RUNNING;
-    } else if (cmd == "debug") {
+
+    } else if (verb == "debug") {
       debugMode = !debugMode;
       Serial.print("Debug Mode: ");
       Serial.println(debugMode ? "ON" : "OFF");
-    } else if (cmd.startsWith("set_deadzone ")) {
-      float newDz = cmd.substring(13).toFloat();
-      if (newDz >= 0 && newDz < 0.9) {
-        joyConfig.deadzone = newDz;
-        saveCalibration();
-        Serial.print("Deadzone set to: ");
-        Serial.println(newDz);
+
+    } else if (verb == "set_deadzone") {
+      if (arg.length() == 0) {
+        Serial.println("Usage: set_deadzone <value>");
+      } else {
+        float newDz = arg.toFloat();
+        if (newDz >= 0 && newDz < 0.9) {
+          joyConfig.deadzone = newDz;
+          saveCalibration();
+          Serial.print("Deadzone set to: ");
+          Serial.println(newDz);
+        } else {
+          Serial.println("Invalid deadzone. Use a value >=0 and <0.9");
+        }
       }
-    } else if (cmd == "next") {
+
+    } else if (verb == "next") {
       if (currentState == STATE_CALIBRATING_CENTER) {
         joyConfig.centerX = analogRead(PIN_JOY_X);
         joyConfig.centerY = analogRead(PIN_JOY_Y);
@@ -337,10 +364,18 @@ void handleSerial() {
         saveCalibration();
         currentState = STATE_RUNNING;
         Serial.println("Calibration Complete.");
+      } else {
+        Serial.println("'next' ignored in current state.");
       }
-    } else if (cmd == "version") {
+
+    } else if (verb == "version") {
       Serial.print("FW_VERSION:");
       Serial.println(FW_VERSION);
+
+    } else {
+      Serial.print("Unknown command: ");
+      Serial.println(line);
+      Serial.println("Type 'help' for a list of commands.");
     }
   }
 }

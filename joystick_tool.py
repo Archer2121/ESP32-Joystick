@@ -15,6 +15,7 @@ import serial
 import serial.tools.list_ports
 import time
 import queue
+import re
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, scrolledtext, filedialog
@@ -33,13 +34,98 @@ os.makedirs(FW_DIR, exist_ok=True)
 
 READ_TIMEOUT = 0.1
 
+
+class SerialManager:
+    def __init__(self):
+        self.serial = None
+        self.read_thread = None
+        self.alive = threading.Event()
+        self.listeners = []
+        self.lock = threading.Lock()
+
+    def add_listener(self, cb):
+        try:
+            with self.lock:
+                self.listeners.append(cb)
+        except Exception:
+            pass
+
+    def remove_listener(self, cb):
+        try:
+            with self.lock:
+                if cb in self.listeners:
+                    self.listeners.remove(cb)
+        except Exception:
+            pass
+
+    def connect(self, port, baud=BAUD_SERIAL, timeout=READ_TIMEOUT):
+        if self.serial and self.serial.is_open:
+            return
+        self.serial = serial.Serial(port, baud, timeout=timeout)
+        self.alive.set()
+        self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self.read_thread.start()
+
+    def disconnect(self):
+        self.alive.clear()
+        try:
+            if self.read_thread:
+                self.read_thread.join(timeout=0.5)
+        except Exception:
+            pass
+        try:
+            if self.serial and self.serial.is_open:
+                self.serial.close()
+        except Exception:
+            pass
+        self.serial = None
+
+    def _read_loop(self):
+        while self.alive.is_set() and self.serial and self.serial.is_open:
+            try:
+                line = self.serial.readline().decode(errors='replace')
+                if line:
+                    with self.lock:
+                        for cb in list(self.listeners):
+                            try:
+                                cb(line)
+                            except Exception:
+                                pass
+                else:
+                    time.sleep(0.01)
+            except Exception as e:
+                with self.lock:
+                    for cb in list(self.listeners):
+                        try:
+                            cb(f"<ERROR reading serial: {e}>\n")
+                        except Exception:
+                            pass
+                break
+
+    def write(self, data: bytes):
+        try:
+            if self.serial and self.serial.is_open:
+                self.serial.write(data)
+        except Exception:
+            pass
+
+    @property
+    def is_open(self):
+        return bool(self.serial and getattr(self.serial, 'is_open', False))
+
+    def get_port(self):
+        try:
+            return self.serial.port if self.serial else None
+        except Exception:
+            return None
+
 class UpdaterTab(ttk.Frame):
-    def __init__(self, master):
+    def __init__(self, master, port_var=None, serial_manager=None):
         super().__init__(master)
-        self.port = tk.StringVar()
+        self.port = port_var or tk.StringVar()
+        self.serial_manager = serial_manager
         self.progress = tk.IntVar()
         self.status = tk.StringVar(value="Idle")
-        self.ser = None
         self._build()
         self.refresh_ports()
 
@@ -48,6 +134,7 @@ class UpdaterTab(ttk.Frame):
         self.ports = ttk.Combobox(self, textvariable=self.port, width=25)
         self.ports.grid(row=0, column=1, sticky='w')
         ttk.Button(self, text="Refresh Ports", command=self.refresh_ports).grid(row=0, column=2, padx=6)
+        ttk.Button(self, text="Settings", command=self._open_settings).grid(row=0, column=3, padx=6)
         ttk.Button(self, text="Update Firmware (merged)", command=self.start_update).grid(row=1, column=0, columnspan=3, pady=6)
 
         self.pbar = ttk.Progressbar(self, maximum=100, variable=self.progress)
@@ -73,22 +160,50 @@ class UpdaterTab(ttk.Frame):
             pass
 
     def start_serial(self):
-        if self.ser:
+        if not self.serial_manager:
+            # fallback to internal serial if no manager
+            try:
+                if getattr(self, 'ser', None):
+                    return
+                self.ser = serial.Serial(self.port.get(), BAUD_SERIAL, timeout=0.1)
+                threading.Thread(target=self.read_serial, daemon=True).start()
+            except Exception as e:
+                self.log(f"[SERIAL ERROR] {e}\n")
+                try:
+                    messagebox.showwarning('Serial Open Failed', f"Unable to open {self.port.get()} for serial monitor:\n{e}\n\nClose other apps using the port and try again.")
+                except Exception:
+                    pass
             return
         try:
-            self.ser = serial.Serial(self.port.get(), BAUD_SERIAL, timeout=0.1)
-            threading.Thread(target=self.read_serial, daemon=True).start()
+            # attach a logger callback and connect via manager
+            self.serial_manager.add_listener(self._manager_log_cb)
+            if not self.serial_manager.is_open:
+                self.serial_manager.connect(self.port.get())
         except Exception as e:
             self.log(f"[SERIAL ERROR] {e}\n")
 
+    def set_settings_callback(self, cb):
+        self.settings_callback = cb
+
+    def _open_settings(self):
+        # switch to the dedicated Settings tab if a callback exists
+        try:
+            if hasattr(self, 'settings_callback') and callable(self.settings_callback):
+                self.settings_callback()
+        except Exception:
+            pass
+
     def read_serial(self):
-        while self.ser:
+        while getattr(self, 'ser', None):
             try:
                 line = self.ser.readline().decode(errors='ignore')
                 if line:
                     self.log(line)
             except Exception:
                 break
+
+    def _manager_log_cb(self, text):
+        self.log(text)
 
     def start_update(self):
         resp = messagebox.askquestion("Update Source", "Update from a local merged .bin file?\nYes = local file, No = GitHub merged binary")
@@ -102,7 +217,7 @@ class UpdaterTab(ttk.Frame):
 
     def enter_flash_mode(self):
         try:
-            if self.ser:
+            if getattr(self, 'ser', None):
                 try:
                     self.ser.close()
                 except Exception:
@@ -152,17 +267,84 @@ class UpdaterTab(ttk.Frame):
             self.status.set("Entering flash mode...")
             self.enter_flash_mode()
 
+            # If the shared SerialManager has the port open, close it before invoking esptool
+            reconnect_after = False
+            try:
+                if self.serial_manager and self.serial_manager.is_open:
+                    try:
+                        # remove our listener so we don't get callback noise
+                        try:
+                            self.serial_manager.remove_listener(self._manager_log_cb)
+                        except Exception:
+                            pass
+                        self.serial_manager.disconnect()
+                        reconnect_after = True
+                        self.log("[INFO] Released COM port for esptool.\n")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             self.status.set("Erasing flash...")
-            subprocess.run(["esptool", "--chip", CHIP, "--port", self.port.get(), "erase-flash"], check=True)
+            try:
+                subprocess.run(["esptool", "--chip", CHIP, "--port", self.port.get(), "erase-flash"], check=True)
+            except Exception as e:
+                self.progress.set(0)
+                self.status.set("Error")
+                try:
+                    messagebox.showerror('Flash Error', f"Could not open {self.port.get()} or erase flash:\n{e}\n\nHint: ensure no other program is using the COM port and try again.")
+                except Exception:
+                    pass
+                # attempt to reconnect serial manager if we disconnected
+                if reconnect_after:
+                    try:
+                        self.serial_manager.connect(self.port.get())
+                        self.serial_manager.add_listener(self._manager_log_cb)
+                    except Exception:
+                        pass
+                return
 
             self.status.set(f"Flashing merged binary at {flash_addr}...")
             cmd = ["esptool", "--chip", CHIP, "--port", self.port.get(), "--baud", BAUD_FLASH, "write-flash", flash_addr, merged_path]
-            subprocess.run(cmd, check=True)
+            try:
+                subprocess.run(cmd, check=True)
+            except Exception as e:
+                self.progress.set(0)
+                self.status.set("Error")
+                try:
+                    messagebox.showerror('Flash Error', f"Could not open {self.port.get()} or write flash:\n{e}\n\nHint: ensure no other program is using the COM port and try again.")
+                except Exception:
+                    pass
+                if reconnect_after:
+                    try:
+                        self.serial_manager.connect(self.port.get())
+                        self.serial_manager.add_listener(self._manager_log_cb)
+                    except Exception:
+                        pass
+                return
+
+            # Reconnect serial manager if we disconnected it earlier
+            if reconnect_after:
+                try:
+                    self.log("[INFO] Reconnecting serial monitor...\n")
+                    self.serial_manager.connect(self.port.get())
+                    self.serial_manager.add_listener(self._manager_log_cb)
+                except Exception:
+                    pass
 
             self.progress.set(100)
             self.status.set("Update complete ✔")
             time.sleep(2)
-            self.start_serial()
+            # start shared serial monitor if available
+            try:
+                if self.serial_manager:
+                    self.serial_manager.add_listener(self._manager_log_cb)
+                    if not self.serial_manager.is_open:
+                        self.serial_manager.connect(self.port.get())
+                else:
+                    self.start_serial()
+            except Exception:
+                pass
 
         except Exception as e:
             self.progress.set(0)
@@ -171,8 +353,10 @@ class UpdaterTab(ttk.Frame):
 
 
 class CalibratorTab(ttk.Frame):
-    def __init__(self, master):
+    def __init__(self, master, port_var=None, serial_manager=None):
         super().__init__(master)
+        self.port_var = port_var or tk.StringVar()
+        self.serial_manager = serial_manager
         self.serial = None
         self.read_thread = None
         self.alive = threading.Event()
@@ -198,10 +382,11 @@ class CalibratorTab(ttk.Frame):
         top = ttk.Frame(self)
         top.grid(row=0, column=0, sticky='we')
         ttk.Label(top, text='Port:').grid(row=0, column=0)
-        self.port_cb = ttk.Combobox(top, width=20, state='readonly')
-        self.port_cb.grid(row=0, column=1, padx=6)
-        ttk.Button(top, text='Refresh', command=self.refresh_ports).grid(row=0, column=2)
-        self.connect_btn = ttk.Button(top, text='Connect', command=self.toggle_connect)
+        # show current shared port only (settings/manage in Updater)
+        self.port_label = ttk.Label(top, textvariable=self.port_var)
+        self.port_label.grid(row=0, column=1, padx=6)
+        # single "Connect" button, disconnect UI removed (shared manager handles disconnect)
+        self.connect_btn = ttk.Button(top, text='Connect', command=self.connect)
         self.connect_btn.grid(row=0, column=3, padx=6)
 
         controls = ttk.Frame(self)
@@ -218,8 +403,7 @@ class CalibratorTab(ttk.Frame):
         self.dz_var = tk.StringVar(value='0.15')
         ttk.Entry(settings, width=8, textvariable=self.dz_var).grid(row=0, column=1)
         ttk.Button(settings, text='Set', command=self.set_deadzone).grid(row=0, column=2, padx=6)
-        self.show_output = tk.BooleanVar(value=True)
-        ttk.Checkbutton(settings, text='Show Serial Output', variable=self.show_output, command=self._update_output_visibility).grid(row=1, column=0, columnspan=3, pady=(6,0))
+        self.show_output = tk.BooleanVar(value=False)
 
         self.status_var = tk.StringVar(value='Disconnected')
         ttk.Label(self, textvariable=self.status_var).grid(row=3, column=0, sticky='w', pady=(6,0))
@@ -234,37 +418,60 @@ class CalibratorTab(ttk.Frame):
         self.ver_label.grid(row=5, column=0, sticky='w', pady=(6,0))
 
         self.refresh_ports()
+        # hide serial output by default if requested
+        try:
+            self._update_output_visibility()
+        except Exception:
+            pass
 
     def refresh_ports(self):
+        # keep behavior minimal: refresh available ports and set shared port if empty
         ports = [p.device for p in serial.tools.list_ports.comports()]
-        self.port_cb['values'] = ports
-        if ports:
+        if ports and not self.port_var.get():
             try:
-                self.port_cb.current(0)
+                self.port_var.set(ports[0])
             except Exception:
                 pass
 
     def _auto_connect(self):
-        vals = self.port_cb['values']
+        vals = [p.device for p in serial.tools.list_ports.comports()]
         if vals and len(vals) > 0:
             try:
-                if not self.port_cb.get():
-                    self.port_cb.current(0)
+                if not self.port_var.get():
+                    self.port_var.set(vals[0])
             except Exception:
                 pass
             self.connect()
 
     def toggle_connect(self):
+        # kept for compatibility but not used; prefer single-action connect
         if self.serial and self.serial.is_open:
-            self.disconnect()
+            return
         else:
             self.connect()
 
     def connect(self):
-        port = self.port_cb.get()
+        port = self.port_var.get()
         if not port:
             messagebox.showwarning('No Port', 'Please select a COM port first.')
             return
+        # prefer shared serial manager when available
+        if hasattr(self, 'serial_manager') and self.serial_manager:
+            try:
+                self.serial_manager.add_listener(self._on_serial_line)
+                if not self.serial_manager.is_open:
+                    self.serial_manager.connect(port)
+                self.status_var.set(f'Connected: {port} @ {BAUD_SERIAL}')
+                try:
+                    # keep button as Connect (no disconnect action shown)
+                    self.connect_btn.config(text='Connect')
+                except Exception:
+                    pass
+                self.query_device_version()
+                return
+            except Exception as e:
+                messagebox.showerror('Connection Failed', str(e))
+                return
         try:
             self.serial = serial.Serial(port, BAUD_SERIAL, timeout=READ_TIMEOUT)
         except Exception as e:
@@ -282,6 +489,18 @@ class CalibratorTab(ttk.Frame):
 
     def disconnect(self):
         self.alive.clear()
+        # when using shared manager, just remove our listener
+        if hasattr(self, 'serial_manager') and self.serial_manager:
+            try:
+                self.serial_manager.remove_listener(self._on_serial_line)
+            except Exception:
+                pass
+            self.status_var.set('Disconnected')
+            try:
+                self.connect_btn.config(text='Connect')
+            except Exception:
+                pass
+            return
         if self.read_thread:
             self.read_thread.join(timeout=0.5)
         try:
@@ -308,6 +527,22 @@ class CalibratorTab(ttk.Frame):
                 self.q.put(f"<ERROR reading serial: {e}>\n")
                 break
 
+    def _on_serial_line(self, text):
+        try:
+            self.q.put(text)
+        except Exception:
+            pass
+
+    def attach_serial_manager(self, sm):
+        self.serial_manager = sm
+
+    def detach_serial_manager(self):
+        try:
+            if hasattr(self, 'serial_manager') and self.serial_manager:
+                self.serial_manager.remove_listener(self._on_serial_line)
+        except Exception:
+            pass
+
     def _poll_serial_queue(self):
         try:
             while True:
@@ -326,11 +561,18 @@ class CalibratorTab(ttk.Frame):
         self.after(100, self._poll_serial_queue)
 
     def send_cmd(self, cmd):
-        if not (self.serial and self.serial.is_open):
-            messagebox.showwarning('Not Connected', 'Open a serial connection first.')
-            return
+        # prefer shared serial manager
         try:
-            self.serial.write((cmd + '\n').encode())
+            if hasattr(self, 'serial_manager') and self.serial_manager:
+                if not self.serial_manager.is_open:
+                    messagebox.showwarning('Not Connected', 'Open a serial connection first.')
+                    return
+                self.serial_manager.write((cmd + '\n').encode())
+            else:
+                if not (self.serial and getattr(self.serial, 'is_open', False)):
+                    messagebox.showwarning('Not Connected', 'Open a serial connection first.')
+                    return
+                self.serial.write((cmd + '\n').encode())
             if self.show_output.get():
                 self.log.insert('end', f"> {cmd}\n")
                 self.log.see('end')
@@ -338,8 +580,13 @@ class CalibratorTab(ttk.Frame):
             messagebox.showerror('Send Failed', str(e))
 
     def query_device_version(self):
-        if not (self.serial and self.serial.is_open):
-            return
+        # prefer shared manager
+        if hasattr(self, 'serial_manager') and self.serial_manager:
+            if not self.serial_manager.is_open:
+                return
+        else:
+            if not (self.serial and getattr(self.serial, 'is_open', False)):
+                return
         self.awaiting_version = True
         try:
             self.send_cmd('version')
@@ -429,21 +676,105 @@ class CalibratorTab(ttk.Frame):
         self.send_cmd(f"set_deadzone {f}")
 
 
+class SettingsTab(ttk.Frame):
+    def __init__(self, master, port_var=None, serial_manager=None, calibrator=None):
+        super().__init__(master)
+        self.port_var = port_var or tk.StringVar()
+        self.serial_manager = serial_manager
+        self.calibrator = calibrator
+        self._build()
+
+    def _build(self):
+        ttk.Label(self, text='COM Port:').grid(row=0, column=0, sticky='w', padx=8, pady=8)
+        self.ports_cb = ttk.Combobox(self, textvariable=self.port_var, width=30)
+        self.ports_cb.grid(row=0, column=1, sticky='w', padx=8, pady=8)
+        ttk.Button(self, text='Refresh', command=self.refresh_ports).grid(row=0, column=2, padx=6)
+
+        # Show serial output toggle for calibrator
+        self.show_output = tk.BooleanVar(value=False)
+        if self.calibrator and getattr(self.calibrator, 'show_output', None) is not None:
+            try:
+                self.show_output.set(self.calibrator.show_output.get())
+            except Exception:
+                pass
+        ttk.Checkbutton(self, text='Show Serial Output (Calibrator)', variable=self.show_output).grid(row=1, column=0, columnspan=2, sticky='w', padx=8, pady=(4,8))
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=2, column=0, columnspan=3, pady=8)
+        ttk.Button(btn_frame, text='Apply', command=self.apply).grid(row=0, column=0, padx=6)
+        ttk.Button(btn_frame, text='Close', command=self.close).grid(row=0, column=1, padx=6)
+        self.refresh_ports()
+
+    def refresh_ports(self):
+        vals = [p.device for p in serial.tools.list_ports.comports()]
+        try:
+            self.ports_cb['values'] = vals
+        except Exception:
+            pass
+        if vals and not self.port_var.get():
+            try:
+                self.port_var.set(vals[0])
+            except Exception:
+                pass
+
+    def apply(self):
+        # ensure combobox value applied to shared var
+        try:
+            val = self.ports_cb.get()
+            if val:
+                self.port_var.set(val)
+        except Exception:
+            pass
+        # apply show_output to calibrator
+        if self.calibrator and getattr(self.calibrator, 'show_output', None) is not None:
+            try:
+                self.calibrator.show_output.set(self.show_output.get())
+                self.calibrator._update_output_visibility()
+            except Exception:
+                pass
+
+    def close(self):
+        # select calibrator tab if available, otherwise do nothing
+        try:
+            if self.calibrator:
+                self.master.select(self.calibrator)
+        except Exception:
+            pass
+
+
 class JoystickToolApp(ttk.Frame):
     def __init__(self, root):
         super().__init__(root)
         root.title('Joystick Tool')
         root.geometry('900x640')
         self.pack(fill='both', expand=True)
-
+        # shared COM port var and serial manager for both tabs
         nb = ttk.Notebook(self)
         nb.pack(fill='both', expand=True)
+        self.port_var = tk.StringVar()
+        self.serial_manager = SerialManager()
 
-        self.updater = UpdaterTab(nb)
+        self.updater = UpdaterTab(nb, port_var=self.port_var, serial_manager=self.serial_manager)
         nb.add(self.updater, text='Updater')
 
-        self.calibrator = CalibratorTab(nb)
+        self.calibrator = CalibratorTab(nb, port_var=self.port_var, serial_manager=self.serial_manager)
         nb.add(self.calibrator, text='Calibrator')
+        # allow updater settings dialog to control calibrator options
+        try:
+            self.updater.calibrator = self.calibrator
+        except Exception:
+            pass
+        # add dedicated Settings tab at the right with a gear icon
+        try:
+            self.settings = SettingsTab(nb, port_var=self.port_var, serial_manager=self.serial_manager, calibrator=self.calibrator)
+            nb.add(self.settings, text='⚙ Settings')
+            # wire updater settings button to select this tab
+            try:
+                self.updater.set_settings_callback(lambda: nb.select(self.settings))
+            except Exception:
+                pass
+        except Exception:
+            pass
         # Show calibrator tab first
         try:
             nb.select(self.calibrator)
